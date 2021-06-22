@@ -42,6 +42,7 @@ type BitCloutBlockProducer struct {
 	chain          *Blockchain
 	bitcoinManager *BitcoinManager
 	params         *BitCloutParams
+	postgres       *Postgres
 }
 
 type BlockTemplateStats struct {
@@ -62,7 +63,7 @@ func NewBitCloutBlockProducer(
 	_minBlockUpdateIntervalSeconds uint64, _maxBlockTemplatesToCache uint64,
 	_blockProducerSeed string,
 	_mempool *BitCloutMempool, _chain *Blockchain, _bitcoinManager *BitcoinManager,
-	_params *BitCloutParams) (*BitCloutBlockProducer, error) {
+	_params *BitCloutParams, postgres *Postgres) (*BitCloutBlockProducer, error) {
 
 	var _privKey *btcec.PrivateKey
 	if _blockProducerSeed != "" {
@@ -81,13 +82,14 @@ func NewBitCloutBlockProducer(
 	return &BitCloutBlockProducer{
 		minBlockUpdateIntervalSeconds: _minBlockUpdateIntervalSeconds,
 		maxBlockTemplatesToCache:      _maxBlockTemplatesToCache,
-		blockProducerPrivateKey: _privKey,
+		blockProducerPrivateKey:       _privKey,
 		recentBlockTemplatesProduced:  make(map[BlockHash]*MsgBitCloutBlock),
 
 		mempool:        _mempool,
 		chain:          _chain,
 		bitcoinManager: _bitcoinManager,
 		params:         _params,
+		postgres:       postgres,
 	}, nil
 }
 
@@ -189,7 +191,8 @@ func (bitcloutBlockProducer *BitCloutBlockProducer) _getBlockTemplate(publicKey 
 
 		// Create a new view object.
 		utxoView, err := NewUtxoView(
-			bitcloutBlockProducer.chain.db, bitcloutBlockProducer.params, bitcloutBlockProducer.bitcoinManager)
+			bitcloutBlockProducer.chain.db, bitcloutBlockProducer.params, bitcloutBlockProducer.bitcoinManager,
+			bitcloutBlockProducer.postgres)
 		if err != nil {
 			return nil, nil, nil, errors.Wrapf(err,
 				"BitCloutBlockProducer._getBlockTemplate: Error generating checker UtxoView: ")
@@ -277,7 +280,8 @@ func (bitcloutBlockProducer *BitCloutBlockProducer) _getBlockTemplate(publicKey 
 
 	// Compute the total fee the BlockProducer should get.
 	totalFeeNanos := uint64(0)
-	feesUtxoView, err := NewUtxoView(bitcloutBlockProducer.chain.db, bitcloutBlockProducer.params, bitcloutBlockProducer.bitcoinManager)
+	feesUtxoView, err := NewUtxoView(bitcloutBlockProducer.chain.db, bitcloutBlockProducer.params,
+		bitcloutBlockProducer.bitcoinManager, bitcloutBlockProducer.postgres)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf(
 			"BitCloutBlockProducer._getBlockTemplate: Error generating UtxoView to compute txn fees: %v", err)

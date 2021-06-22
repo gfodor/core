@@ -8,7 +8,7 @@ import (
 	"github.com/unrolled/secure"
 )
 
-const SECURE_MIDDLEWARE_RESTRICTIVE_CONTENT_SECURITY_POLICY = "default-src 'self'"
+const SECURE_MIDDLEWARE_RESTRICTIVE_CONTENT_SECURITY_POLICY = ""
 
 // allowedHost is expected to be of the form "bitclout.com"
 // See comments in this function for a description of these params

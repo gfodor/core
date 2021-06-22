@@ -59,6 +59,9 @@ func SetupRunFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().Bool("regtest", false,
 		"Can only be used in conjunction with --testnet. Creates a private testnet node with fast block times"+
 			"and instantly spendable block rewards.")
+	cmd.PersistentFlags().String("postgres-uri", "", "URI for syncing the node with postgres")
+	cmd.PersistentFlags().String("postgres-data-dir", "", "Start a local embedded postgres instance"+
+		"and persist its data in this directory")
 
 	// Peers
 	cmd.PersistentFlags().StringSlice("connect-ips", []string{},

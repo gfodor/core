@@ -371,104 +371,6 @@ func (bav *UtxoView) GetRecloutPostEntryStateForReader(readerPK []byte, postHash
 	return hex.EncodeToString(recloutEntry.RecloutPostHash[:]), !recloutPostEntry.IsHidden
 }
 
-type SingleStake struct {
-	// Just save the data from the initial stake for posterity.
-	InitialStakeNanos               uint64
-	BlockHeight                     uint64
-	InitialStakeMultipleBasisPoints uint64
-	// The amount distributed to previous users can be computed by
-	// adding the creator percentage and the burn fee and then
-	// subtracting that total percentage off of the InitialStakeNanos.
-	// Example:
-	// - InitialStakeNanos = 100
-	// - CreatorPercentage = 15%
-	// - BurnFeePercentage = 10%
-	// - Amount to pay to previous users = 100 - 15 - 10 = 75
-	InitialCreatorPercentageBasisPoints uint64
-
-	// These fields are what we actually use to pay out the user who staked.
-	//
-	// The initial RemainingAmountOwedNanos is computed by simply multiplying
-	// the InitialStakeNanos by the InitialStakeMultipleBasisPoints.
-	RemainingStakeOwedNanos uint64
-	PublicKey               []byte
-}
-
-type StakeEntry struct {
-	StakeList []*SingleStake
-
-	// Computed for profiles to cache how much has been staked to
-	// their posts in total. When a post is staked to, this value
-	// gets incremented on the profile. It gets reverted on the
-	// profile when the post stake is reverted.
-	TotalPostStake uint64
-}
-
-func NewStakeEntry() *StakeEntry {
-	return &StakeEntry{
-		StakeList: []*SingleStake{},
-	}
-}
-
-func StakeEntryCopy(stakeEntry *StakeEntry) *StakeEntry {
-	newStakeEntry := NewStakeEntry()
-	for _, singleStake := range stakeEntry.StakeList {
-		singleStakeCopy := *singleStake
-		newStakeEntry.StakeList = append(newStakeEntry.StakeList, &singleStakeCopy)
-	}
-	newStakeEntry.TotalPostStake = stakeEntry.TotalPostStake
-
-	return newStakeEntry
-}
-
-type StakeEntryStats struct {
-	TotalStakeNanos           uint64
-	TotalStakeOwedNanos       uint64
-	TotalCreatorEarningsNanos uint64
-	TotalFeesBurnedNanos      uint64
-	TotalPostStakeNanos       uint64
-}
-
-func GetStakeEntryStats(stakeEntry *StakeEntry, params *BitCloutParams) *StakeEntryStats {
-	stakeEntryStats := &StakeEntryStats{}
-
-	for _, singleStake := range stakeEntry.StakeList {
-		stakeEntryStats.TotalStakeNanos += singleStake.InitialStakeNanos
-		stakeEntryStats.TotalStakeOwedNanos += singleStake.RemainingStakeOwedNanos
-		// Be careful when computing these values in order to avoid overflow.
-		stakeEntryStats.TotalCreatorEarningsNanos += big.NewInt(0).Div(
-			big.NewInt(0).Mul(
-				big.NewInt(int64(singleStake.InitialStakeNanos)),
-				big.NewInt(int64(singleStake.InitialCreatorPercentageBasisPoints))),
-			big.NewInt(100*100)).Uint64()
-		stakeEntryStats.TotalFeesBurnedNanos += big.NewInt(0).Div(
-			big.NewInt(0).Mul(
-				big.NewInt(int64(singleStake.InitialStakeNanos)),
-				big.NewInt(int64(params.StakeFeeBasisPoints))),
-			big.NewInt(100*100)).Uint64()
-	}
-	stakeEntryStats.TotalPostStakeNanos = stakeEntry.TotalPostStake
-
-	return stakeEntryStats
-}
-
-type StakeIDType uint8
-
-const (
-	StakeIDTypePost    StakeIDType = 0
-	StakeIDTypeProfile StakeIDType = 1
-)
-
-func (ss StakeIDType) String() string {
-	if ss == StakeIDTypePost {
-		return "post"
-	} else if ss == StakeIDTypeProfile {
-		return "profile"
-	} else {
-		return "unknown"
-	}
-}
-
 type PostEntry struct {
 	// The hash of this post entry. Used as the ID for the entry.
 	PostHash *BlockHash
@@ -520,10 +422,6 @@ type PostEntry struct {
 	// posts in certain situations.
 	IsHidden bool
 
-	// Every post has a StakeEntry that keeps track of all the stakes that
-	// have been applied to this post.
-	StakeEntry *StakeEntry
-
 	// Counter of users that have liked this post.
 	LikeCount uint64
 
@@ -538,9 +436,6 @@ type PostEntry struct {
 
 	// The private fields below aren't serialized or hashed. They are only kept
 	// around for in-memory bookkeeping purposes.
-
-	// Used to sort posts by their stake. Generally not set.
-	stakeStats *StakeEntryStats
 
 	// Whether or not this entry is deleted in the view.
 	isDeleted bool
@@ -691,34 +586,6 @@ type ProfileEntry struct {
 	// example we update a user entry and need to delete the data associated
 	// with the old entry.
 	isDeleted bool
-
-	// TODO(DELETEME): This field is deprecated. It was relevant back when
-	// we wanted to allow people to stake to profiles, which isn't something
-	// we want to support going forward.
-	//
-	// The multiple of the payout when a user stakes to this profile. If
-	// unset, a sane default is set when the first person stakes to this
-	// profile.
-	// 2x multiple = 200% = 20,000bps
-	StakeMultipleBasisPoints uint64
-
-	// TODO(DELETEME): This field is deprecated. It was relevant back when
-	// we wanted to allow people to stake to profiles, which isn't something
-	// we want to support going forward.
-	//
-	// Every provile has a StakeEntry that keeps track of all the stakes that
-	// have been applied to it.
-	StakeEntry *StakeEntry
-
-	// The private fields below aren't serialized or hashed. They are only kept
-	// around for in-memory bookkeeping purposes.
-
-	// TODO(DELETEME): This field is deprecated. It was relevant back when
-	// we wanted to allow people to stake to profiles, which isn't something
-	// we want to support going forward.
-	//
-	// Used to sort profiles by their stake. Generally not set.
-	stakeStats *StakeEntryStats
 }
 
 func (pe *ProfileEntry) IsDeleted() bool {
@@ -741,6 +608,9 @@ type UtxoView struct {
 
 	// Messages data
 	MessageKeyToMessageEntry map[MessageKey]*MessageEntry
+
+	// Postgres stores message data slightly differently
+	MessageMap map[BlockHash]*Message
 
 	// Follow data
 	FollowKeyToFollowEntry map[FollowKey]*FollowEntry
@@ -773,6 +643,7 @@ type UtxoView struct {
 
 	BitcoinManager *BitcoinManager
 	Handle         *badger.DB
+	Postgres       *Postgres
 	Params         *BitCloutParams
 }
 
@@ -928,6 +799,7 @@ type UtxoOperation struct {
 func (bav *UtxoView) _ResetViewMappingsAfterFlush() {
 	// Utxo data
 	bav.UtxoKeyToUtxoEntry = make(map[UtxoKey]*UtxoEntry)
+	// TODO: Deprecate this value
 	bav.NumUtxoEntries = GetUtxoNumEntries(bav.Handle)
 
 	// BitcoinExchange data
@@ -948,6 +820,7 @@ func (bav *UtxoView) _ResetViewMappingsAfterFlush() {
 
 	// Messages data
 	bav.MessageKeyToMessageEntry = make(map[MessageKey]*MessageEntry)
+	bav.MessageMap = make(map[BlockHash]*Message)
 
 	// Follow data
 	bav.FollowKeyToFollowEntry = make(map[FollowKey]*FollowEntry)
@@ -966,7 +839,7 @@ func (bav *UtxoView) _ResetViewMappingsAfterFlush() {
 }
 
 func (bav *UtxoView) CopyUtxoView() (*UtxoView, error) {
-	newView, err := NewUtxoView(bav.Handle, bav.Params, bav.BitcoinManager)
+	newView, err := NewUtxoView(bav.Handle, bav.Params, bav.BitcoinManager, bav.Postgres)
 	if err != nil {
 		return nil, err
 	}
@@ -1032,6 +905,12 @@ func (bav *UtxoView) CopyUtxoView() (*UtxoView, error) {
 		newView.MessageKeyToMessageEntry[msgKey] = &newMsgEntry
 	}
 
+	newView.MessageMap = make(map[BlockHash]*Message, len(bav.MessageMap))
+	for txnHash, message := range bav.MessageMap {
+		newMessage := *message
+		newView.MessageMap[txnHash] = &newMessage
+	}
+
 	// Copy the follow data
 	newView.FollowKeyToFollowEntry = make(map[FollowKey]*FollowEntry, len(bav.FollowKeyToFollowEntry))
 	for followKey, followEntry := range bav.FollowKeyToFollowEntry {
@@ -1073,22 +952,32 @@ func (bav *UtxoView) CopyUtxoView() (*UtxoView, error) {
 }
 
 func NewUtxoView(
-	_handle *badger.DB, _params *BitCloutParams, _bitcoinManager *BitcoinManager) (*UtxoView, error) {
+	_handle *badger.DB,
+	_params *BitCloutParams,
+	_bitcoinManager *BitcoinManager,
+	_postgres *Postgres,
+) (*UtxoView, error) {
 
 	view := UtxoView{
 		Handle:         _handle,
+		Postgres:       _postgres,
 		Params:         _params,
 		BitcoinManager: _bitcoinManager,
-		// Note that the TipHash does not get reset as part of
-		// _ResetViewMappingsAfterFlush because it is not something that is affected by a
-		// flush operation. Moreover, its value is consistent with the view regardless of
-		// whether or not the view is flushed or not. Additionally the utxo view does
-		// not concern itself with the header chain (see comment on GetBestHash for more
-		// info on that).
-		TipHash: DbGetBestHash(_handle, ChainTypeBitCloutBlock /* don't get the header chain */),
-
 		// Set everything else in _ResetViewMappings()
 	}
+
+	// Note that the TipHash does not get reset as part of
+	// _ResetViewMappingsAfterFlush because it is not something that is affected by a
+	// flush operation. Moreover, its value is consistent with the view regardless of
+	// whether or not the view is flushed or not. Additionally the utxo view does
+	// not concern itself with the header chain (see comment on GetBestHash for more
+	// info on that).
+	if view.Postgres != nil {
+		view.TipHash = view.Postgres.GetChain("main").TipHash
+	} else {
+		view.TipHash = DbGetBestHash(view.Handle, ChainTypeBitCloutBlock /* don't get the header chain */)
+	}
+
 	// This function is generally used to reset the view after a flush has been performed
 	// but we can use it here to initialize the mappings.
 	view._ResetViewMappingsAfterFlush()
@@ -1132,7 +1021,11 @@ func (bav *UtxoView) GetUtxoEntryForUtxoKey(utxoKey *UtxoKey) *UtxoEntry {
 	// If the utxo entry isn't in our in-memory data structure, fetch it from the
 	// db.
 	if !ok {
-		utxoEntry = DbGetUtxoEntryForUtxoKey(bav.Handle, utxoKey)
+		if bav.Postgres != nil {
+			utxoEntry = bav.Postgres.GetUtxoEntryForUtxoKey(utxoKey)
+		} else {
+			utxoEntry = DbGetUtxoEntryForUtxoKey(bav.Handle, utxoKey)
+		}
 		if utxoEntry == nil {
 			// This means the utxo is neither in our map nor in the db so
 			// it doesn't exist. Return nil to signal that in this case.
@@ -1540,6 +1433,7 @@ func (bav *UtxoView) _disconnectUpdateGlobalParams(
 		currentTxn, txnHash, utxoOpsForTxn[:operationIndex], blockHeight)
 }
 
+// TODO: Update for postgres
 func (bav *UtxoView) _disconnectPrivateMessage(
 	operationType OperationType, currentTxn *MsgBitCloutTxn, txnHash *BlockHash,
 	utxoOpsForTxn []*UtxoOperation, blockHeight uint32) error {
@@ -2675,6 +2569,33 @@ func (bav *UtxoView) _deleteMessageEntryMappings(messageEntry *MessageEntry) {
 	bav._setMessageEntryMappings(&tombstoneMessageEntry)
 }
 
+//
+// Postgres messages
+//
+
+func (bav *UtxoView) getMessage(messageHash *BlockHash) *Message {
+	mapValue, existsMapValue := bav.MessageMap[*messageHash]
+	if existsMapValue {
+		return mapValue
+	}
+
+	message := bav.Postgres.GetMessage(messageHash)
+	if message != nil {
+		bav.setMessageMappings(message)
+	}
+	return message
+}
+
+func (bav *UtxoView) setMessageMappings(message *Message) {
+	bav.MessageMap[*message.MessageHash] = message
+}
+
+func (bav *UtxoView) deleteMessageMappings(message *Message) {
+	deletedMessage := *message
+	deletedMessage.isDeleted = true
+	bav.setMessageMappings(&deletedMessage)
+}
+
 func (bav *UtxoView) _getLikeEntryForLikeKey(likeKey *LikeKey) *LikeEntry {
 	// If an entry exists in the in-memory map, return the value of that mapping.
 	mapValue, existsMapValue := bav.LikeKeyToLikeEntry[*likeKey]
@@ -2685,8 +2606,14 @@ func (bav *UtxoView) _getLikeEntryForLikeKey(likeKey *LikeKey) *LikeEntry {
 	// If we get here it means no value exists in our in-memory map. In this case,
 	// defer to the db. If a mapping exists in the db, return it. If not, return
 	// nil. Either way, save the value to the in-memory view mapping got later.
-	if DbGetLikerPubKeyToLikedPostHashMapping(
-		bav.Handle, likeKey.LikerPubKey[:], likeKey.LikedPostHash) != nil {
+	likeExists := false
+	if bav.Postgres != nil {
+		likeExists = bav.Postgres.GetLike(likeKey.LikerPubKey[:], &likeKey.LikedPostHash) != nil
+	} else {
+		likeExists = DbGetLikerPubKeyToLikedPostHashMapping(bav.Handle, likeKey.LikerPubKey[:], likeKey.LikedPostHash) != nil
+	}
+
+	if likeExists {
 		likeEntry := LikeEntry{
 			LikerPubKey:   likeKey.LikerPubKey[:],
 			LikedPostHash: &likeKey.LikedPostHash,
@@ -2694,6 +2621,7 @@ func (bav *UtxoView) _getLikeEntryForLikeKey(likeKey *LikeKey) *LikeEntry {
 		bav._setLikeEntryMappings(&likeEntry)
 		return &likeEntry
 	}
+
 	return nil
 }
 
@@ -2786,8 +2714,14 @@ func (bav *UtxoView) _getFollowEntryForFollowKey(followKey *FollowKey) *FollowEn
 	// If we get here it means no value exists in our in-memory map. In this case,
 	// defer to the db. If a mapping exists in the db, return it. If not, return
 	// nil. Either way, save the value to the in-memory view mapping got later.
-	if DbGetFollowerToFollowedMapping(
-		bav.Handle, &followKey.FollowerPKID, &followKey.FollowedPKID) != nil {
+	followExists := false
+	if bav.Postgres != nil {
+		followExists = bav.Postgres.GetFollow(&followKey.FollowerPKID, &followKey.FollowedPKID) != nil
+	} else {
+		followExists = DbGetFollowerToFollowedMapping(bav.Handle, &followKey.FollowerPKID, &followKey.FollowedPKID) != nil
+	}
+
+	if followExists {
 		followEntry := FollowEntry{
 			FollowerPKID: &followKey.FollowerPKID,
 			FollowedPKID: &followKey.FollowedPKID,
@@ -2795,6 +2729,7 @@ func (bav *UtxoView) _getFollowEntryForFollowKey(followKey *FollowKey) *FollowEn
 		bav._setFollowEntryMappings(&followEntry)
 		return &followEntry
 	}
+
 	return nil
 }
 
@@ -2867,31 +2802,44 @@ func (bav *UtxoView) GetFollowEntriesForPublicKey(publicKey []byte, getEntriesFo
 	}
 
 	// Start by fetching all the follows we have in the db.
-	var dbPKIDs []*PKID
-	var err error
-	if getEntriesFollowingPublicKey {
-		dbPKIDs, err = DbGetPKIDsFollowingYou(bav.Handle, pkidForPublicKey.PKID)
-	} else {
-		dbPKIDs, err = DbGetPKIDsYouFollow(bav.Handle, pkidForPublicKey.PKID)
-	}
-	if err != nil {
-		return nil, errors.Wrapf(err, "GetFollowsForUser: Problem fetching FollowEntrys from db: ")
-	}
-
-	// Iterate through the entries found in the db and force the view to load them.
-	// This fills in any gaps in the view so that, after this, the view should contain
-	// the union of what it had before plus what was in the db.
-	for _, dbPKID := range dbPKIDs {
-		var followKey FollowKey
+	if bav.Postgres != nil {
+		var follows []*Follow
 		if getEntriesFollowingPublicKey {
-			// publicKey is the followed public key
-			followKey = MakeFollowKey(dbPKID, pkidForPublicKey.PKID)
+			follows = bav.Postgres.GetFollowers(pkidForPublicKey.PKID)
 		} else {
-			// publicKey is the follower public key
-			followKey = MakeFollowKey(pkidForPublicKey.PKID, dbPKID)
+			follows = bav.Postgres.GetFollowing(pkidForPublicKey.PKID)
 		}
 
-		bav._getFollowEntryForFollowKey(&followKey)
+		for _, follow := range follows {
+			bav._setFollowEntryMappings(follow.NewFollowEntry())
+		}
+	} else {
+		var dbPKIDs []*PKID
+		var err error
+		if getEntriesFollowingPublicKey {
+			dbPKIDs, err = DbGetPKIDsFollowingYou(bav.Handle, pkidForPublicKey.PKID)
+		} else {
+			dbPKIDs, err = DbGetPKIDsYouFollow(bav.Handle, pkidForPublicKey.PKID)
+		}
+		if err != nil {
+			return nil, errors.Wrapf(err, "GetFollowsForUser: Problem fetching FollowEntrys from db: ")
+		}
+
+		// Iterate through the entries found in the db and force the view to load them.
+		// This fills in any gaps in the view so that, after this, the view should contain
+		// the union of what it had before plus what was in the db.
+		for _, dbPKID := range dbPKIDs {
+			var followKey FollowKey
+			if getEntriesFollowingPublicKey {
+				// publicKey is the followed public key
+				followKey = MakeFollowKey(dbPKID, pkidForPublicKey.PKID)
+			} else {
+				// publicKey is the follower public key
+				followKey = MakeFollowKey(pkidForPublicKey.PKID, dbPKID)
+			}
+
+			bav._getFollowEntryForFollowKey(&followKey)
+		}
 	}
 
 	followEntriesToReturn := bav._followEntriesForPubKey(publicKey, getEntriesFollowingPublicKey)
@@ -2946,7 +2894,6 @@ func (bav *UtxoView) _deleteDiamondEntryMappings(diamondEntry *DiamondEntry) {
 
 func (bav *UtxoView) GetDiamondEntryForDiamondKey(diamondKey *DiamondKey) *DiamondEntry {
 	// If an entry exists in the in-memory map, return the value of that mapping.
-
 	bavDiamondEntry, existsMapValue := bav.DiamondKeyToDiamondEntry[*diamondKey]
 	if existsMapValue {
 		return bavDiamondEntry
@@ -2955,12 +2902,26 @@ func (bav *UtxoView) GetDiamondEntryForDiamondKey(diamondKey *DiamondKey) *Diamo
 	// If we get here it means no value exists in our in-memory map. In this case,
 	// defer to the db. If a mapping exists in the db, return it. If not, return
 	// nil.
-	dbDiamondEntry := DbGetDiamondMappings(
-		bav.Handle, &diamondKey.ReceiverPKID, &diamondKey.SenderPKID, &diamondKey.DiamondPostHash)
-	if dbDiamondEntry != nil {
-		bav._setDiamondEntryMappings(dbDiamondEntry)
+	var diamondEntry *DiamondEntry
+	if bav.Postgres != nil {
+		diamond := bav.Postgres.GetDiamond(&diamondKey.SenderPKID, &diamondKey.ReceiverPKID, &diamondKey.DiamondPostHash)
+		if diamond != nil {
+			diamondEntry = &DiamondEntry{
+				SenderPKID:      diamond.SenderPKID,
+				ReceiverPKID:    diamond.ReceiverPKID,
+				DiamondPostHash: diamond.DiamondPostHash,
+				DiamondLevel:    int64(diamond.DiamondLevel),
+			}
+		}
+	} else {
+		diamondEntry = DbGetDiamondMappings(bav.Handle, &diamondKey.ReceiverPKID, &diamondKey.SenderPKID, &diamondKey.DiamondPostHash)
 	}
-	return dbDiamondEntry
+
+	if diamondEntry != nil {
+		bav._setDiamondEntryMappings(diamondEntry)
+	}
+
+	return diamondEntry
 }
 
 func (bav *UtxoView) GetPostEntryForPostHash(postHash *BlockHash) *PostEntry {
@@ -2974,11 +2935,19 @@ func (bav *UtxoView) GetPostEntryForPostHash(postHash *BlockHash) *PostEntry {
 	// If we get here it means no value exists in our in-memory map. In this case,
 	// defer to the db. If a mapping exists in the db, return it. If not, return
 	// nil.
-	dbPostEntry := DBGetPostEntryByPostHash(bav.Handle, postHash)
-	if dbPostEntry != nil {
-		bav._setPostEntryMappings(dbPostEntry)
+	if bav.Postgres != nil {
+		post := bav.Postgres.GetPost(postHash)
+		if post != nil {
+			return bav.setPostMappings(post)
+		}
+		return nil
+	} else {
+		dbPostEntry := DBGetPostEntryByPostHash(bav.Handle, postHash)
+		if dbPostEntry != nil {
+			bav._setPostEntryMappings(dbPostEntry)
+		}
+		return dbPostEntry
 	}
-	return dbPostEntry
 }
 
 func (bav *UtxoView) GetDiamondEntryMapForPublicKey(publicKey []byte, fetchYouDiamonded bool,
@@ -3070,8 +3039,7 @@ func (bav *UtxoView) GetDiamondEntriesForSenderToReceiver(receiverPublicKey []by
 func (bav *UtxoView) _setPostEntryMappings(postEntry *PostEntry) {
 	// This function shouldn't be called with nil.
 	if postEntry == nil {
-		glog.Errorf("_setPostEntryMappings: Called with nil PostEntry; " +
-			"this should never happen.")
+		glog.Errorf("_setPostEntryMappings: Called with nil PostEntry; this should never happen.")
 		return
 	}
 
@@ -3089,6 +3057,15 @@ func (bav *UtxoView) _deletePostEntryMappings(postEntry *PostEntry) {
 	bav._setPostEntryMappings(&tombstonePostEntry)
 }
 
+func (bav *UtxoView) setPostMappings(post *Post) *PostEntry {
+	postEntry := post.NewPostEntry()
+
+	// Add a mapping for the post.
+	bav.PostHashToPostEntry[*post.PostHash] = postEntry
+
+	return postEntry
+}
+
 func (bav *UtxoView) _getBalanceEntryForHODLerPKIDAndCreatorPKID(
 	hodlerPKID *PKID, creatorPKID *PKID) *BalanceEntry {
 
@@ -3102,12 +3079,24 @@ func (bav *UtxoView) _getBalanceEntryForHODLerPKIDAndCreatorPKID(
 	// If we get here it means no value exists in our in-memory map. In this case,
 	// defer to the db. If a mapping exists in the db, return it. If not, return
 	// nil.
-	dbBalanceEntry := DBGetCreatorCoinBalanceEntryForHODLerAndCreatorPKIDs(
-		bav.Handle, hodlerPKID, creatorPKID)
-	if dbBalanceEntry != nil {
-		bav._setBalanceEntryMappingsWithPKIDs(dbBalanceEntry, hodlerPKID, creatorPKID)
+	var balanceEntry *BalanceEntry
+	if bav.Postgres != nil {
+		balance := bav.Postgres.GetCreatorCoinBalance(hodlerPKID, creatorPKID)
+		if balance != nil {
+			balanceEntry = &BalanceEntry{
+				HODLerPKID:   balance.HolderPKID,
+				CreatorPKID:  balance.CreatorPKID,
+				BalanceNanos: balance.BalanceNanos,
+				HasPurchased: balance.HasPurchased,
+			}
+		}
+	} else {
+		balanceEntry = DBGetCreatorCoinBalanceEntryForHODLerAndCreatorPKIDs(bav.Handle, hodlerPKID, creatorPKID)
 	}
-	return dbBalanceEntry
+	if balanceEntry != nil {
+		bav._setBalanceEntryMappingsWithPKIDs(balanceEntry, hodlerPKID, creatorPKID)
+	}
+	return balanceEntry
 }
 
 func (bav *UtxoView) GetBalanceEntryForHODLerPubKeyAndCreatorPubKey(
@@ -3165,12 +3154,103 @@ func (bav *UtxoView) _deleteBalanceEntryMappings(
 	bav._deleteBalanceEntryMappingsWithPKIDs(balanceEntry, hodlerPKID.PKID, creatorPKID.PKID)
 }
 
+func (bav *UtxoView) GetHoldings(pkid *PKID, fetchProfiles bool) ([]*BalanceEntry, []*ProfileEntry, error) {
+	var entriesYouHold []*BalanceEntry
+	if bav.Postgres != nil {
+		balances := bav.Postgres.GetHoldings(pkid)
+		for _, balance := range balances {
+			entriesYouHold = append(entriesYouHold, balance.NewBalanceEntry())
+		}
+	} else {
+		holdings, err := DbGetBalanceEntriesYouHold(bav.Handle, pkid, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		entriesYouHold = holdings
+	}
+
+	holdingsMap := make(map[PKID]*BalanceEntry)
+	for _, balanceEntry := range entriesYouHold {
+		holdingsMap[*balanceEntry.CreatorPKID] = balanceEntry
+	}
+
+	for _, balanceEntry := range bav.HODLerPKIDCreatorPKIDToBalanceEntry {
+		if reflect.DeepEqual(balanceEntry.HODLerPKID, pkid) {
+			if _, ok := holdingsMap[*balanceEntry.CreatorPKID]; ok {
+				// We found both a mempool and a db balanceEntry. Update the BalanceEntry using mempool data.
+				holdingsMap[*balanceEntry.CreatorPKID].BalanceNanos = balanceEntry.BalanceNanos
+			} else {
+				// Add new entries to the list
+				entriesYouHold = append(entriesYouHold, balanceEntry)
+			}
+		}
+	}
+
+	// Optionally fetch all the profile entries as well.
+	var profilesYouHold []*ProfileEntry
+	if fetchProfiles {
+		for _, balanceEntry := range entriesYouHold {
+			// In this case you're the hodler so the creator is the one whose profile we need to fetch.
+			currentProfileEntry := bav.GetProfileEntryForPKID(balanceEntry.CreatorPKID)
+			profilesYouHold = append(profilesYouHold, currentProfileEntry)
+		}
+	}
+
+	return entriesYouHold, profilesYouHold, nil
+}
+
+func (bav *UtxoView) GetHolders(pkid *PKID, fetchProfiles bool) ([]*BalanceEntry, []*ProfileEntry, error) {
+	var holderEntries []*BalanceEntry
+	if bav.Postgres != nil {
+		balances := bav.Postgres.GetHolders(pkid)
+		for _, balance := range balances {
+			holderEntries = append(holderEntries, balance.NewBalanceEntry())
+		}
+	} else {
+		holders, err := DbGetBalanceEntriesHodlingYou(bav.Handle, pkid, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		holderEntries = holders
+	}
+
+	holdersMap := make(map[PKID]*BalanceEntry)
+	for _, balanceEntry := range holderEntries {
+		holdersMap[*balanceEntry.HODLerPKID] = balanceEntry
+	}
+
+	for _, balanceEntry := range bav.HODLerPKIDCreatorPKIDToBalanceEntry {
+		if reflect.DeepEqual(balanceEntry.HODLerPKID, pkid) {
+			if _, ok := holdersMap[*balanceEntry.HODLerPKID]; ok {
+				// We found both a mempool and a db balanceEntry. Update the BalanceEntry using mempool data.
+				holdersMap[*balanceEntry.HODLerPKID].BalanceNanos = balanceEntry.BalanceNanos
+			} else {
+				// Add new entries to the list
+				holderEntries = append(holderEntries, balanceEntry)
+			}
+		}
+	}
+
+	// Optionally fetch all the profile entries as well.
+	var profilesYouHold []*ProfileEntry
+	if fetchProfiles {
+		for _, balanceEntry := range holderEntries {
+			// In this case you're the hodler so the creator is the one whose profile we need to fetch.
+			currentProfileEntry := bav.GetProfileEntryForPKID(balanceEntry.CreatorPKID)
+			profilesYouHold = append(profilesYouHold, currentProfileEntry)
+		}
+	}
+
+	return holderEntries, profilesYouHold, nil
+}
+
 func (bav *UtxoView) GetProfileEntryForUsername(nonLowercaseUsername []byte) *ProfileEntry {
 	// If an entry exists in the in-memory map, return the value of that mapping.
 
 	// Note that the call to MakeUsernameMapKey will lowercase the username
 	// and thus enforce a uniqueness check.
-	mapValue, existsMapValue := bav.ProfileUsernameToProfileEntry[MakeUsernameMapKey(nonLowercaseUsername)]
+	mapKey := MakeUsernameMapKey(nonLowercaseUsername)
+	mapValue, existsMapValue := bav.ProfileUsernameToProfileEntry[mapKey]
 	if existsMapValue {
 		return mapValue
 	}
@@ -3179,11 +3259,22 @@ func (bav *UtxoView) GetProfileEntryForUsername(nonLowercaseUsername []byte) *Pr
 	// defer to the db. If a mapping exists in the db, return it. If not, return
 	// nil.
 	// Note that the DB username lookup is case-insensitive.
-	dbProfileEntry := DBGetProfileEntryForUsername(bav.Handle, nonLowercaseUsername)
-	if dbProfileEntry != nil {
-		bav._setProfileEntryMappings(dbProfileEntry)
+	if bav.Postgres != nil {
+		profile := bav.Postgres.GetProfileForUsername(string(nonLowercaseUsername))
+		if profile == nil {
+			bav.ProfileUsernameToProfileEntry[mapKey] = nil
+			return nil
+		}
+
+		profileEntry, _ := bav.setProfileMappings(profile)
+		return profileEntry
+	} else {
+		dbProfileEntry := DBGetProfileEntryForUsername(bav.Handle, nonLowercaseUsername)
+		if dbProfileEntry != nil {
+			bav._setProfileEntryMappings(dbProfileEntry)
+		}
+		return dbProfileEntry
 	}
-	return dbProfileEntry
 }
 
 func (bav *UtxoView) GetPKIDForPublicKey(publicKey []byte) *PKIDEntry {
@@ -3200,11 +3291,26 @@ func (bav *UtxoView) GetPKIDForPublicKey(publicKey []byte) *PKIDEntry {
 	// Note that we construct an entry from the DB return value in order to track
 	// isDeleted on the view. If not for isDeleted, we wouldn't need the PKIDEntry
 	// wrapper.
-	dbPKIDEntry := DBGetPKIDEntryForPublicKey(bav.Handle, publicKey)
-	if dbPKIDEntry != nil {
-		bav._setPKIDMappings(dbPKIDEntry)
+	if bav.Postgres != nil {
+		profile := bav.Postgres.GetProfileForPublicKey(publicKey)
+		if profile == nil {
+			pkidEntry := &PKIDEntry{
+				PKID:      PublicKeyToPKID(publicKey),
+				PublicKey: publicKey,
+			}
+			bav._setPKIDMappings(pkidEntry)
+			return pkidEntry
+		}
+
+		_, pkidEntry := bav.setProfileMappings(profile)
+		return pkidEntry
+	} else {
+		dbPKIDEntry := DBGetPKIDEntryForPublicKey(bav.Handle, publicKey)
+		if dbPKIDEntry != nil {
+			bav._setPKIDMappings(dbPKIDEntry)
+		}
+		return dbPKIDEntry
 	}
-	return dbPKIDEntry
 }
 
 func (bav *UtxoView) GetPublicKeyForPKID(pkid *PKID) []byte {
@@ -3221,14 +3327,29 @@ func (bav *UtxoView) GetPublicKeyForPKID(pkid *PKID) []byte {
 	// Note that we construct an entry from the DB return value in order to track
 	// isDeleted on the view. If not for isDeleted, we wouldn't need the PKIDEntry
 	// wrapper.
-	dbPublicKey := DBGetPublicKeyForPKID(bav.Handle, pkid)
-	if len(dbPublicKey) != 0 {
-		bav._setPKIDMappings(&PKIDEntry{
-			PKID:      pkid,
-			PublicKey: dbPublicKey,
-		})
+	if bav.Postgres != nil {
+		profile := bav.Postgres.GetProfile(*pkid)
+		if profile == nil {
+			pkidEntry := &PKIDEntry{
+				PKID:      pkid,
+				PublicKey: PKIDToPublicKey(pkid),
+			}
+			bav._setPKIDMappings(pkidEntry)
+			return pkidEntry.PublicKey
+		}
+
+		profileEntry, _ := bav.setProfileMappings(profile)
+		return profileEntry.PublicKey
+	} else {
+		dbPublicKey := DBGetPublicKeyForPKID(bav.Handle, pkid)
+		if len(dbPublicKey) != 0 {
+			bav._setPKIDMappings(&PKIDEntry{
+				PKID:      pkid,
+				PublicKey: dbPublicKey,
+			})
+		}
+		return dbPublicKey
 	}
-	return dbPublicKey
 }
 
 func (bav *UtxoView) _setPKIDMappings(pkidEntry *PKIDEntry) {
@@ -3274,11 +3395,22 @@ func (bav *UtxoView) GetProfileEntryForPKID(pkid *PKID) *ProfileEntry {
 	// If we get here it means no value exists in our in-memory map. In this case,
 	// defer to the db. If a mapping exists in the db, return it. If not, return
 	// nil.
-	dbProfileEntry := DBGetProfileEntryForPKID(bav.Handle, pkid)
-	if dbProfileEntry != nil {
-		bav._setProfileEntryMappings(dbProfileEntry)
+	if bav.Postgres != nil {
+		// Note: We should never get here but writing this code just in case
+		profile := bav.Postgres.GetProfile(*pkid)
+		if profile == nil {
+			return nil
+		}
+
+		profileEntry, _ := bav.setProfileMappings(profile)
+		return profileEntry
+	} else {
+		dbProfileEntry := DBGetProfileEntryForPKID(bav.Handle, pkid)
+		if dbProfileEntry != nil {
+			bav._setProfileEntryMappings(dbProfileEntry)
+		}
+		return dbProfileEntry
 	}
-	return dbProfileEntry
 }
 
 func (bav *UtxoView) _setProfileEntryMappings(profileEntry *ProfileEntry) {
@@ -3289,13 +3421,7 @@ func (bav *UtxoView) _setProfileEntryMappings(profileEntry *ProfileEntry) {
 		return
 	}
 
-	// Look up the current PKID for the profile. It should never be nil, since
-	// we create it if it doesn't exist.
-	//
-	// TODO: This seems like it could create a lot of unnecessary PKID mappings in the db.
-	//
-	// TODO: Is creating the PKID if it doesn't exist the right approach? Or should we
-	// return nil and force the caller to create it before setting mappings?
+	// Look up the current PKID for the profile. Never nil because we create the entry if it doesn't exist
 	pkidEntry := bav.GetPKIDForPublicKey(profileEntry.PublicKey)
 
 	// Add a mapping for the profile.
@@ -3311,6 +3437,73 @@ func (bav *UtxoView) _deleteProfileEntryMappings(profileEntry *ProfileEntry) {
 
 	// Set the mappings to point to the tombstone entry.
 	bav._setProfileEntryMappings(&tombstoneProfileEntry)
+}
+
+// Takes a Postgres Profile, sets all the mappings on the view, returns the equivalent ProfileEntry and PKIDEntry
+func (bav *UtxoView) setProfileMappings(profile *Profile) (*ProfileEntry, *PKIDEntry) {
+	pkidEntry := &PKIDEntry{
+		PKID:      profile.PKID,
+		PublicKey: profile.PublicKey.ToBytes(),
+	}
+	bav._setPKIDMappings(pkidEntry)
+
+	profileEntry := &ProfileEntry{
+		PublicKey:   profile.PublicKey.ToBytes(),
+		Username:    []byte(profile.Username),
+		Description: []byte(profile.Description),
+		ProfilePic:  profile.ProfilePic,
+		CoinEntry: CoinEntry{
+			CreatorBasisPoints:      profile.CreatorBasisPoints,
+			BitCloutLockedNanos:     profile.BitCloutLockedNanos,
+			NumberOfHolders:         profile.NumberOfHolders,
+			CoinsInCirculationNanos: profile.CoinsInCirculationNanos,
+			CoinWatermarkNanos:      profile.CoinWatermarkNanos,
+		},
+	}
+
+	bav._setProfileEntryMappings(profileEntry)
+
+	return profileEntry, pkidEntry
+}
+
+func (bav *UtxoView) GetProfilesByCoinValue(startLockedNanos uint64, limit int) []*ProfileEntry {
+	profiles := bav.Postgres.GetProfilesByCoinValue(startLockedNanos, limit)
+	var profileEntrys []*ProfileEntry
+	for _, profile := range profiles {
+		profileEntry, _ := bav.setProfileMappings(profile)
+		profileEntrys = append(profileEntrys, profileEntry)
+	}
+	return profileEntrys
+}
+
+func (bav *UtxoView) GetProfilesForUsernamePrefixByCoinValue(usernamePrefix string) []*ProfileEntry {
+	profiles := bav.Postgres.GetProfilesForUsernamePrefixByCoinValue(usernamePrefix, 50)
+	pubKeysMap := make(map[PkMapKey][]byte)
+
+	// TODO: We are overwriting profiles here which is awful
+	for _, profile := range profiles {
+		bav.setProfileMappings(profile)
+	}
+
+	lowercaseUsernamePrefixString := strings.ToLower(usernamePrefix)
+	var profileEntrys []*ProfileEntry
+	for _, pk := range pubKeysMap {
+		pkid := bav.GetPKIDForPublicKey(pk).PKID
+		profile := bav.GetProfileEntryForPKID(pkid)
+		// Double-check that a username matches the prefix.
+		// If a user had the handle "elon" and then changed to "jeff" and that transaction hadn't mined yet,
+		// we would return the profile for "jeff" when we search for "elon" which is incorrect.
+		if profile != nil && strings.HasPrefix(strings.ToLower(string(profile.Username[:])), lowercaseUsernamePrefixString) {
+			profileEntrys = append(profileEntrys, profile)
+		}
+	}
+
+	// Username searches are always sorted by coin value.
+	sort.Slice(profileEntrys, func(ii, jj int) bool {
+		return profileEntrys[ii].CoinEntry.BitCloutLockedNanos > profileEntrys[jj].CoinEntry.BitCloutLockedNanos
+	})
+
+	return profileEntrys
 }
 
 func (bav *UtxoView) _existsBitcoinTxIDMapping(bitcoinBurnTxID *BlockHash) bool {
@@ -3430,15 +3623,13 @@ func (bav *UtxoView) _connectBitcoinExchange(
 		return 0, 0, nil, RuleErrorDeflationBombForbidsMintingAnyMoreBitClout
 	}
 
-	if bav.BitcoinManager == nil ||
-		!bav.BitcoinManager.IsCurrent(false /*considerCumWork*/) {
-
-		return 0, 0, nil, fmt.Errorf("_connectBitcoinExchange: BitcoinManager "+
-			"must be non-nil and time-current in order to connect "+
-			"BitcoinExchange transactions: %v", bav.BitcoinManager.IsCurrent(false /*considerCumWork*/))
-	}
-	// At this point we are confident that we have a non-nil time-current
-	// BitcoinManager we can refer to for validation purposes.
+	//if bav.BitcoinManager == nil ||
+	//	!bav.BitcoinManager.IsCurrent(false /*considerCumWork*/) {
+	//
+	//	return 0, 0, nil, fmt.Errorf("_connectBitcoinExchange: BitcoinManager "+
+	//		"must be non-nil and time-current in order to connect "+
+	//		"BitcoinExchange transactions: %v", bav.BitcoinManager.IsCurrent(false /*considerCumWork*/))
+	//}
 
 	// Check that the transaction has the right TxnType.
 	if txn.TxnMeta.GetTxnType() != TxnTypeBitcoinExchange {
@@ -3484,11 +3675,9 @@ func (bav *UtxoView) _connectBitcoinExchange(
 		return 0, 0, nil, RuleErrorBitcoinExchangeDoubleSpendingBitcoinTransaction
 	}
 
-	// If this is a forgiven BitcoinExchange txn then skip all checks
-	if IsForgivenBitcoinTransaction(txn) {
-		checkMerkleProof = false
-		minBitcoinBurnWork = 0
-	}
+	// We're no longer checking bitcoin exchange txns
+	checkMerkleProof = false
+	minBitcoinBurnWork = 0
 
 	if checkMerkleProof {
 		// Check that the BitcoinBlockHash exists in our main Bitcoin header chain.
@@ -3602,8 +3791,7 @@ func (bav *UtxoView) _connectBitcoinExchange(
 	// that should receive the BitClout we are going to create.
 	usdCentsPerBitcoin := bav.GetCurrentUSDCentsPerBitcoin()
 	// Compute the amount of BitClout that we should create as a result of this transaction.
-	nanosToCreate := CalcNanosToCreate(
-		bav.NanosPurchased, uint64(totalBurnOutput), usdCentsPerBitcoin)
+	nanosToCreate := CalcNanosToCreate(bav.NanosPurchased, uint64(totalBurnOutput), usdCentsPerBitcoin)
 
 	// Compute the amount of BitClout that the user will receive. Note
 	// that we allocate a small fee to the miner to incentivize her to include the
@@ -3925,19 +4113,23 @@ func (bav *UtxoView) _connectPrivateMessage(
 
 	// If a message already exists and does not have isDeleted=true then return
 	// an error. In general, messages must have unique (pubkey, tstamp) tuples.
-	senderMessageKey := MakeMessageKey(txn.PublicKey, txMeta.TimestampNanos)
-	senderMessage := bav._getMessageEntryForMessageKey(&senderMessageKey)
-	if senderMessage != nil && !senderMessage.isDeleted {
-		return 0, 0, nil, errors.Wrapf(
-			RuleErrorPrivateMessageExistsWithSenderPublicKeyTstampTuple,
-			"_connectPrivateMessage: Message key: %v", &senderMessageKey)
-	}
-	recipientMessageKey := MakeMessageKey(txMeta.RecipientPublicKey, txMeta.TimestampNanos)
-	recipientMessage := bav._getMessageEntryForMessageKey(&recipientMessageKey)
-	if recipientMessage != nil && !recipientMessage.isDeleted {
-		return 0, 0, nil, errors.Wrapf(
-			RuleErrorPrivateMessageExistsWithRecipientPublicKeyTstampTuple,
-			"_connectPrivateMessage: Message key: %v", &recipientMessageKey)
+	//
+	// Postgres does not enforce these rule errors
+	if bav.Postgres == nil {
+		senderMessageKey := MakeMessageKey(txn.PublicKey, txMeta.TimestampNanos)
+		senderMessage := bav._getMessageEntryForMessageKey(&senderMessageKey)
+		if senderMessage != nil && !senderMessage.isDeleted {
+			return 0, 0, nil, errors.Wrapf(
+				RuleErrorPrivateMessageExistsWithSenderPublicKeyTstampTuple,
+				"_connectPrivateMessage: Message key: %v", &senderMessageKey)
+		}
+		recipientMessageKey := MakeMessageKey(txMeta.RecipientPublicKey, txMeta.TimestampNanos)
+		recipientMessage := bav._getMessageEntryForMessageKey(&recipientMessageKey)
+		if recipientMessage != nil && !recipientMessage.isDeleted {
+			return 0, 0, nil, errors.Wrapf(
+				RuleErrorPrivateMessageExistsWithRecipientPublicKeyTstampTuple,
+				"_connectPrivateMessage: Message key: %v", &recipientMessageKey)
+		}
 	}
 
 	if verifySignatures {
@@ -3959,16 +4151,27 @@ func (bav *UtxoView) _connectPrivateMessage(
 		Version:            1,
 	}
 
-
 	//Check if message is encrypted with shared secret
 	extraV, hasExtraV := txn.ExtraData["V"]
 	if hasExtraV {
-		Version,_ := Uvarint(extraV)
+		Version, _ := Uvarint(extraV)
 		messageEntry.Version = uint8(Version)
 	}
 
-	// Set the mappings in our in-memory map for the MessageEntry.
-	bav._setMessageEntryMappings(messageEntry)
+	if bav.Postgres != nil {
+		message := &Message{
+			MessageHash:        txn.Hash(),
+			SenderPublicKey:    txn.PublicKey,
+			RecipientPublicKey: txMeta.RecipientPublicKey,
+			EncryptedText:      txMeta.EncryptedText,
+			TimestampNanos:     txMeta.TimestampNanos,
+		}
+
+		bav.setMessageMappings(message)
+	} else {
+		// Set the mappings in our in-memory map for the MessageEntry.
+		bav._setMessageEntryMappings(messageEntry)
+	}
 
 	// Add an operation to the list at the end indicating we've added a message
 	// to our data structure.
@@ -4475,7 +4678,6 @@ func (bav *UtxoView) _connectSubmitPost(
 			StakeMultipleBasisPoints: txMeta.StakeMultipleBasisPoints,
 			TimestampNanos:           txMeta.TimestampNanos,
 			ConfirmationBlockHeight:  blockHeight,
-			StakeEntry:               NewStakeEntry(),
 			PostExtraData:            extraData,
 			// Don't set IsHidden on new posts.
 		}
@@ -4571,7 +4773,7 @@ func (bav *UtxoView) _getParentAndGrandparentPostEntry(postEntry *PostEntry) (
 	// If we ever allow commenting on something else such that the parent is not a post, but where
 	// ParentStakeID is also HashSizeBytes, then this logic would likely need to be changed.
 	if len(postEntry.ParentStakeID) == HashSizeBytes {
-		parentPostEntry = bav.GetPostEntryForPostHash(StakeIDToHash(postEntry.ParentStakeID))
+		parentPostEntry = bav.GetPostEntryForPostHash(NewBlockHash(postEntry.ParentStakeID))
 		if parentPostEntry == nil {
 			return nil, nil, errors.Wrapf(
 				RuleErrorSubmitPostParentNotFound,
@@ -4582,7 +4784,7 @@ func (bav *UtxoView) _getParentAndGrandparentPostEntry(postEntry *PostEntry) (
 	}
 
 	if parentPostEntry != nil && len(parentPostEntry.ParentStakeID) == HashSizeBytes {
-		grandparentPostEntry = bav.GetPostEntryForPostHash(StakeIDToHash(parentPostEntry.ParentStakeID))
+		grandparentPostEntry = bav.GetPostEntryForPostHash(NewBlockHash(parentPostEntry.ParentStakeID))
 		if grandparentPostEntry == nil {
 			return nil, nil, errors.Wrapf(
 				RuleErrorSubmitPostParentNotFound,
@@ -4693,7 +4895,7 @@ func (bav *UtxoView) _connectUpdateProfile(
 
 	// If a profile with this username exists already AND if that profile
 	// belongs to another public key then that's an error.
-	{
+	if len(txMeta.NewUsername) != 0 {
 		// Note that this check is case-insensitive
 		existingProfileEntry := bav.GetProfileEntryForUsername(txMeta.NewUsername)
 		if existingProfileEntry != nil && !existingProfileEntry.isDeleted &&
@@ -4784,12 +4986,6 @@ func (bav *UtxoView) _connectUpdateProfile(
 
 		// Just always set the creator basis points and stake multiple.
 		newProfileEntry.CreatorBasisPoints = txMeta.NewCreatorBasisPoints
-
-		// TODO: This field is deprecated and should be deleted.
-		newProfileEntry.StakeMultipleBasisPoints = txMeta.NewStakeMultipleBasisPoints
-
-		// The StakeEntry is always left unmodified here.
-
 	} else {
 		// When there's no pre-existing profile entry we need to do more
 		// checks.
@@ -4824,13 +5020,6 @@ func (bav *UtxoView) _connectUpdateProfile(
 				// The other coin fields are automatically set to zero, which is an
 				// appropriate default value for all of them.
 			},
-
-			// TODO(DELETEME): This field is deprecated and should be deleted because we're
-			// not allowing staking to profiles.
-			StakeMultipleBasisPoints: txMeta.NewStakeMultipleBasisPoints,
-			// TODO(DELETEME): This field is deprecated and should be deleted because we're
-			// not allowing staking to profiles.
-			StakeEntry: NewStakeEntry(),
 		}
 	}
 	// At this point the newProfileEntry should be set to what we actually
@@ -4962,6 +5151,22 @@ func (bav *UtxoView) _connectSwapIdentity(
 	// Set the new mappings for the *from* and *to* PKID's.
 	bav._setPKIDMappings(&newFromPKIDEntry)
 	bav._setPKIDMappings(&newToPKIDEntry)
+
+	// Postgres doesn't have a concept of PKID Mappings. Instead, we need to save an empty
+	// profile with the correct PKID and public key
+	if bav.Postgres != nil {
+		if fromProfileEntry == nil {
+			bav._setProfileEntryMappings(&ProfileEntry{
+				PublicKey: toPublicKey,
+			})
+		}
+
+		if toProfileEntry == nil {
+			bav._setProfileEntryMappings(&ProfileEntry{
+				PublicKey: fromPublicKey,
+			})
+		}
+	}
 
 	// Add an operation to the list at the end indicating we've swapped identities.
 	utxoOpsForTxn = append(utxoOpsForTxn, &UtxoOperation{
@@ -5352,7 +5557,7 @@ func (bav *UtxoView) HelpConnectCreatorCoinBuy(
 	// If the user does not have a balance entry or the user's balance entry is deleted and we have passed the
 	// BuyCreatorCoinAfterDeletedBalanceEntryFixBlockHeight, we create a new balance entry.
 	if buyerBalanceEntry == nil ||
-			(buyerBalanceEntry.isDeleted && blockHeight > BuyCreatorCoinAfterDeletedBalanceEntryFixBlockHeight){
+		(buyerBalanceEntry.isDeleted && blockHeight > BuyCreatorCoinAfterDeletedBalanceEntryFixBlockHeight) {
 		// If there is no balance entry for this mapping yet then just create it.
 		// In this case the balance will be zero.
 		buyerBalanceEntry = &BalanceEntry{
@@ -6286,8 +6491,7 @@ func (bav *UtxoView) ConnectBlock(
 	// Check that the block being connected references the current tip. ConnectBlock
 	// can only add a block to the current tip. We do this to keep the API simple.
 	if *bitcloutBlock.Header.PrevBlockHash != *bav.TipHash {
-		return nil, fmt.Errorf(
-			"ConnectBlock: Parent hash of block being connected does not match tip")
+		return nil, fmt.Errorf("ConnectBlock: Parent hash of block being connected does not match tip")
 	}
 
 	blockHeader := bitcloutBlock.Header
@@ -6367,6 +6571,60 @@ func (bav *UtxoView) ConnectBlock(
 	return utxoOps, nil
 }
 
+func (bav *UtxoView) Preload(bitcloutBlock *MsgBitCloutBlock) error {
+	// One iteration for all the PKIDs
+	var publicKeys []*PublicKey
+	for _, txn := range bitcloutBlock.Txns {
+		if txn.TxnMeta.GetTxnType() == TxnTypeFollow {
+			txnMeta := txn.TxnMeta.(*FollowMetadata)
+			publicKeys = append(publicKeys, NewPublicKey(txn.PublicKey))
+			publicKeys = append(publicKeys, NewPublicKey(txnMeta.FollowedPublicKey))
+		}
+	}
+
+	if len(publicKeys) > 0 {
+		// Set pkid entries for all the public keys
+		for _, publicKey := range publicKeys {
+			publicKeyBytes := publicKey.ToBytes()
+			pkidEntry := &PKIDEntry{
+				PKID:      PublicKeyToPKID(publicKeyBytes),
+				PublicKey: publicKeyBytes,
+			}
+			bav._setPKIDMappings(pkidEntry)
+		}
+
+		// Set real entries for all the profiles that actually exist
+		result := bav.Postgres.GetProfilesForPublicKeys(publicKeys)
+		for _, profile := range result {
+			bav.setProfileMappings(profile)
+		}
+	}
+
+	// One iteration for everything else
+	// TODO: For some reason just fetching follows from the DB causes consensus issues??
+	//var follows []*Follow
+	//for _, txn := range bitcloutBlock.Txns {
+	//	if txn.TxnMeta.GetTxnType() == TxnTypeFollow {
+	//		txnMeta := txn.TxnMeta.(*FollowMetadata)
+	//		follows = append(follows, &Follow{
+	//			FollowerPKID: bav.GetPKIDForPublicKey(txn.PublicKey).PKID,
+	//			FollowedPKID: bav.GetPKIDForPublicKey(txnMeta.FollowedPublicKey).PKID,
+	//		})
+	//	}
+	//}
+	//
+	//if len(follows) > 0 {
+	//	validFollows := bav.Postgres.GetFollows(follows)
+	//	glog.Infof("Preloading follows %d -> %d", len(follows), len(validFollows))
+	//	//for _, follow := range validFollows {
+	//	//
+	//	//}
+	//}
+
+	return nil
+}
+
+// TODO: Update for Postgres
 func (bav *UtxoView) GetMessagesForUser(publicKey []byte) (
 	_messageEntries []*MessageEntry, _err error) {
 
@@ -6407,6 +6665,7 @@ func (bav *UtxoView) GetMessagesForUser(publicKey []byte) (
 	return messageEntriesToReturn, nil
 }
 
+// TODO: Update for Postgres
 func (bav *UtxoView) GetLimitedMessagesForUser(publicKey []byte) (
 	_messageEntries []*MessageEntry, _err error) {
 
@@ -6447,20 +6706,22 @@ func (bav *UtxoView) GetLimitedMessagesForUser(publicKey []byte) (
 	return messageEntriesToReturn, nil
 }
 
-func (bav *UtxoView) GetCommentEntriesForParentStakeID(parentStakeID []byte,
-) (_commentEntries []*PostEntry, _err error) {
+func (bav *UtxoView) GetCommentEntriesForParentStakeID(parentStakeID []byte) ([]*PostEntry, error) {
+	if bav.Postgres != nil {
+		posts := bav.Postgres.GetComments(NewBlockHash(parentStakeID))
+		for _, post := range posts {
+			bav.setPostMappings(post)
+		}
+	} else {
+		_, dbCommentHashes, _, err := DBGetCommentPostHashesForParentStakeID(bav.Handle, parentStakeID, false)
+		if err != nil {
+			return nil, errors.Wrapf(err, "GetCommentEntriesForParentStakeID: Problem fetching comments: %v", err)
+		}
 
-	// Get the comment hashes from the DB.
-	_, dbCommentHashes, _, err := DBGetCommentPostHashesForParentStakeID(
-		bav.Handle, parentStakeID, false /*fetchEntries*/)
-	if err != nil {
-		return nil, errors.Wrapf(
-			err, "GetCommentEntriesForParentStakeID: Problem fetching comment PostEntry's from db: ")
-	}
-
-	// Load comment hashes into the view.
-	for _, commentHash := range dbCommentHashes {
-		bav.GetPostEntryForPostHash(commentHash)
+		// Load comment hashes into the view.
+		for _, commentHash := range dbCommentHashes {
+			bav.GetPostEntryForPostHash(commentHash)
+		}
 	}
 
 	commentEntries := []*PostEntry{}
@@ -6471,6 +6732,8 @@ func (bav *UtxoView) GetCommentEntriesForParentStakeID(parentStakeID []byte,
 		}
 
 		if len(postEntry.ParentStakeID) == 0 || !reflect.DeepEqual(postEntry.ParentStakeID, parentStakeID) {
+			glog.Info(postEntry.ParentStakeID)
+			glog.Info(parentStakeID)
 			continue // Skip posts that are not comments on the given parentStakeID.
 		} else {
 			// Add the comment to our map.
@@ -6578,9 +6841,9 @@ func (bav *UtxoView) GetAllPosts() (_corePosts []*PostEntry, _commentsByPostHash
 			allCorePosts = append(allCorePosts, postEntry)
 		} else {
 			// Add the comment to our map.
-			commentsForPost := commentsByPostHash[*StakeIDToHash(postEntry.ParentStakeID)]
+			commentsForPost := commentsByPostHash[*NewBlockHash(postEntry.ParentStakeID)]
 			commentsForPost = append(commentsForPost, postEntry)
-			commentsByPostHash[*StakeIDToHash(postEntry.ParentStakeID)] = commentsForPost
+			commentsByPostHash[*NewBlockHash(postEntry.ParentStakeID)] = commentsForPost
 		}
 	}
 	// Sort all the comment lists as well. Here we put the latest comment at the
@@ -6595,68 +6858,85 @@ func (bav *UtxoView) GetAllPosts() (_corePosts []*PostEntry, _commentsByPostHash
 }
 
 func (bav *UtxoView) GetPostsPaginatedForPublicKeyOrderedByTimestamp(publicKey []byte, startPostHash *BlockHash, limit uint64, mediaRequired bool) (_posts []*PostEntry, _err error) {
-	handle := bav.Handle
-	dbPrefix := append([]byte{}, _PrefixPosterPublicKeyTimestampPostHash...)
-	dbPrefix = append(dbPrefix, publicKey...)
-	var prefix []byte
-	if startPostHash != nil {
-		startPostEntry := bav.GetPostEntryForPostHash(startPostHash)
-		if startPostEntry == nil {
-			return nil, fmt.Errorf("GetPostsPaginatedForPublicKeyOrderedByTimestamp: Invalid start post hash")
-		}
-		prefix = append(dbPrefix, EncodeUint64(startPostEntry.TimestampNanos)...)
-		prefix = append(prefix, startPostEntry.PostHash[:]...)
-	} else {
-		maxBigEndianUint64Bytes := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
-		prefix = append(dbPrefix, maxBigEndianUint64Bytes...)
-	}
-	timestampSizeBytes := 8
-	var posts []*PostEntry
-	err := handle.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-
-		opts.PrefetchValues = false
-
-		// Go in reverse order
-		opts.Reverse = true
-
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		it.Seek(prefix)
+	if bav.Postgres != nil {
+		var startTime uint64 = math.MaxUint64
 		if startPostHash != nil {
-			// Skip the first post if we have a startPostHash.
-			it.Next()
+			startPostEntry := bav.GetPostEntryForPostHash(startPostHash)
+			startTime = startPostEntry.TimestampNanos
 		}
-		for ; it.ValidForPrefix(dbPrefix) && uint64(len(posts)) < limit; it.Next() {
-			rawKey := it.Item().Key()
-
-			keyWithoutPrefix := rawKey[1:]
-			//posterPublicKey := keyWithoutPrefix[:HashSizeBytes]
-			publicKeySizeBytes := HashSizeBytes + 1
-			//tstampNanos := DecodeUint64(keyWithoutPrefix[publicKeySizeBytes:(publicKeySizeBytes + timestampSizeBytes)])
-
-			postHash := &BlockHash{}
-			copy(postHash[:], keyWithoutPrefix[(publicKeySizeBytes+timestampSizeBytes):])
-			postEntry := bav.GetPostEntryForPostHash(postHash)
-			if postEntry == nil {
-				return fmt.Errorf("Missing post entry")
-			}
-			if postEntry.isDeleted || postEntry.ParentStakeID != nil || postEntry.IsHidden {
+		posts := bav.Postgres.GetPosts(publicKey, startTime, limit)
+		for _, post := range posts {
+			// TODO: Normalize this field so we get the correct number of results from the DB
+			if mediaRequired && !post.HasMedia() {
 				continue
 			}
-
-			// mediaRequired set to determine if we only want posts that include media and ignore posts without
-			if mediaRequired && !postEntry.HasMedia() {
-				continue
-			}
-
-			posts = append(posts, postEntry)
+			bav.setPostMappings(post)
 		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+	} else {
+		handle := bav.Handle
+		dbPrefix := append([]byte{}, _PrefixPosterPublicKeyTimestampPostHash...)
+		dbPrefix = append(dbPrefix, publicKey...)
+		var prefix []byte
+		if startPostHash != nil {
+			startPostEntry := bav.GetPostEntryForPostHash(startPostHash)
+			if startPostEntry == nil {
+				return nil, fmt.Errorf("GetPostsPaginatedForPublicKeyOrderedByTimestamp: Invalid start post hash")
+			}
+			prefix = append(dbPrefix, EncodeUint64(startPostEntry.TimestampNanos)...)
+			prefix = append(prefix, startPostEntry.PostHash[:]...)
+		} else {
+			maxBigEndianUint64Bytes := []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+			prefix = append(dbPrefix, maxBigEndianUint64Bytes...)
+		}
+		timestampSizeBytes := 8
+		var posts []*PostEntry
+		err := handle.View(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+
+			opts.PrefetchValues = false
+
+			// Go in reverse order
+			opts.Reverse = true
+
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			it.Seek(prefix)
+			if startPostHash != nil {
+				// Skip the first post if we have a startPostHash.
+				it.Next()
+			}
+			for ; it.ValidForPrefix(dbPrefix) && uint64(len(posts)) < limit; it.Next() {
+				rawKey := it.Item().Key()
+
+				keyWithoutPrefix := rawKey[1:]
+				//posterPublicKey := keyWithoutPrefix[:HashSizeBytes]
+				publicKeySizeBytes := HashSizeBytes + 1
+				//tstampNanos := DecodeUint64(keyWithoutPrefix[publicKeySizeBytes:(publicKeySizeBytes + timestampSizeBytes)])
+
+				postHash := &BlockHash{}
+				copy(postHash[:], keyWithoutPrefix[(publicKeySizeBytes+timestampSizeBytes):])
+				postEntry := bav.GetPostEntryForPostHash(postHash)
+				if postEntry == nil {
+					return fmt.Errorf("Missing post entry")
+				}
+				if postEntry.isDeleted || postEntry.ParentStakeID != nil || postEntry.IsHidden {
+					continue
+				}
+
+				// mediaRequired set to determine if we only want posts that include media and ignore posts without
+				if mediaRequired && !postEntry.HasMedia() {
+					continue
+				}
+
+				posts = append(posts, postEntry)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
+
 	var postEntries []*PostEntry
 	// Iterate over the view. Put all posts authored by the public key into our mempool posts slice
 	for _, postEntry := range bav.PostHashToPostEntry {
@@ -6674,6 +6954,7 @@ func (bav *UtxoView) GetPostsPaginatedForPublicKeyOrderedByTimestamp(publicKey [
 			postEntries = append(postEntries, postEntry)
 		}
 	}
+
 	return postEntries, nil
 }
 
@@ -6682,7 +6963,6 @@ func (bav *UtxoView) GetDiamondSendersForPostHash(postHash *BlockHash) (_pkidToD
 	dbPrefix := append([]byte{}, _PrefixDiamondedPostHashDiamonderPKIDDiamondLevel...)
 	dbPrefix = append(dbPrefix, postHash[:]...)
 	keysFound, _ := EnumerateKeysForPrefix(handle, dbPrefix)
-
 
 	diamondPostEntry := bav.GetPostEntryForPostHash(postHash)
 	receiverPKIDEntry := bav.GetPKIDForPublicKey(diamondPostEntry.PosterPublicKey)
@@ -6719,27 +6999,34 @@ func (bav *UtxoView) GetDiamondSendersForPostHash(postHash *BlockHash) (_pkidToD
 }
 
 func (bav *UtxoView) GetLikesForPostHash(postHash *BlockHash) (_likerPubKeys [][]byte, _err error) {
-	handle := bav.Handle
-	dbPrefix := append([]byte{}, _PrefixLikedPostHashToLikerPubKey...)
-	dbPrefix = append(dbPrefix, postHash[:]...)
-	keysFound, _ := EnumerateKeysForPrefix(handle, dbPrefix)
-
-	// Iterate over all the db keys & values and load them into the view.
-	expectedKeyLength := 1 + HashSizeBytes + btcec.PubKeyBytesLenCompressed
-	for _, key := range keysFound {
-		// Sanity check that this is a reasonable key.
-		if len(key) != expectedKeyLength {
-			return nil, fmt.Errorf("UtxoView.GetLikesForPostHash: Invalid key length found: %d", len(key))
+	if bav.Postgres != nil {
+		likes := bav.Postgres.GetLikes(postHash)
+		for _, like := range likes {
+			bav._setLikeEntryMappings(like.NewLikeEntry())
 		}
+	} else {
+		handle := bav.Handle
+		dbPrefix := append([]byte{}, _PrefixLikedPostHashToLikerPubKey...)
+		dbPrefix = append(dbPrefix, postHash[:]...)
+		keysFound, _ := EnumerateKeysForPrefix(handle, dbPrefix)
 
-		likerPubKey := key[1+HashSizeBytes:]
+		// Iterate over all the db keys & values and load them into the view.
+		expectedKeyLength := 1 + HashSizeBytes + btcec.PubKeyBytesLenCompressed
+		for _, key := range keysFound {
+			// Sanity check that this is a reasonable key.
+			if len(key) != expectedKeyLength {
+				return nil, fmt.Errorf("UtxoView.GetLikesForPostHash: Invalid key length found: %d", len(key))
+			}
 
-		likeKey := &LikeKey{
-			LikerPubKey:   MakePkMapKey(likerPubKey),
-			LikedPostHash: *postHash,
+			likerPubKey := key[1+HashSizeBytes:]
+
+			likeKey := &LikeKey{
+				LikerPubKey:   MakePkMapKey(likerPubKey),
+				LikedPostHash: *postHash,
+			}
+
+			bav._getLikeEntryForLikeKey(likeKey)
 		}
-
-		bav._getLikeEntryForLikeKey(likeKey)
 	}
 
 	// Iterate over the view and create the final list to return.
@@ -6904,7 +7191,6 @@ func (bav *UtxoView) GetAllProfiles(readerPK []byte) (
 		if len(postEntry.ParentStakeID) == 0 {
 			// In this case we are dealing with a "core" post so add it to the
 			// core post map.
-			postEntry.stakeStats = GetStakeEntryStats(postEntry.StakeEntry, bav.Params)
 			corePostsForProfile := corePostsByPublicKey[MakePkMapKey(postEntry.PosterPublicKey)]
 			corePostsForProfile = append(corePostsForProfile, postEntry)
 			corePostsByPublicKey[MakePkMapKey(postEntry.PosterPublicKey)] = corePostsForProfile
@@ -6931,16 +7217,9 @@ func (bav *UtxoView) GetAllProfiles(readerPK []byte) (
 		if profileEntry.isDeleted {
 			continue
 		}
-		profileEntry.stakeStats = GetStakeEntryStats(profileEntry.StakeEntry, bav.Params)
 		profilesByPublicKey[MakePkMapKey(profileEntry.PublicKey)] = profileEntry
 	}
 
-	// Sort the posts for each profile by when their stake.
-	for _, postsForProfile := range corePostsByPublicKey {
-		sort.Slice(postsForProfile, func(ii, jj int) bool {
-			return postsForProfile[ii].stakeStats.TotalStakeNanos > postsForProfile[jj].stakeStats.TotalStakeNanos
-		})
-	}
 	// Sort all the comment lists. Here we put the latest comment at the
 	// end.
 	for _, commentList := range commentsByProfilePublicKey {
@@ -6977,7 +7256,13 @@ func IsRestrictedPubKey(userGraylistState []byte, userBlacklistState []byte, mod
 func (bav *UtxoView) GetUnspentUtxoEntrysForPublicKey(pkBytes []byte) ([]*UtxoEntry, error) {
 	// Fetch the relevant utxos for this public key from the db. We do this because
 	// the db could contain utxos that are not currently loaded into the view.
-	utxoEntriesForPublicKey, err := DbGetUtxosForPubKey(pkBytes, bav.Handle)
+	var utxoEntriesForPublicKey []*UtxoEntry
+	var err error
+	if bav.Postgres != nil {
+		utxoEntriesForPublicKey = bav.Postgres.GetUtxoEntriesForPublicKey(pkBytes)
+	} else {
+		utxoEntriesForPublicKey, err = DbGetUtxosForPubKey(pkBytes, bav.Handle)
+	}
 	if err != nil {
 		return nil, errors.Wrapf(err, "UtxoView.GetUnspentUtxoEntrysForPublicKey: Problem fetching "+
 			"utxos for public key %s", PkToString(pkBytes, bav.Params))
@@ -7598,53 +7883,48 @@ func (bav *UtxoView) _flushBalanceEntriesToDbWithTxn(txn *badger.Txn) error {
 }
 
 func (bav *UtxoView) FlushToDbWithTxn(txn *badger.Txn) error {
-	// Flush the utxos to the db.
-	if err := bav._flushUtxosToDbWithTxn(txn); err != nil {
-		return err
+	// Only flush to BadgerDB if Postgres is disabled
+	if bav.Postgres == nil {
+		if err := bav._flushUtxosToDbWithTxn(txn); err != nil {
+			return err
+		}
+		if err := bav._flushProfileEntriesToDbWithTxn(txn); err != nil {
+			return err
+		}
+		if err := bav._flushPKIDEntriesToDbWithTxn(txn); err != nil {
+			return err
+		}
+		if err := bav._flushPostEntriesToDbWithTxn(txn); err != nil {
+			return err
+		}
+		if err := bav._flushLikeEntriesToDbWithTxn(txn); err != nil {
+			return err
+		}
+		if err := bav._flushFollowEntriesToDbWithTxn(txn); err != nil {
+			return err
+		}
+		if err := bav._flushDiamondEntriesToDbWithTxn(txn); err != nil {
+			return err
+		}
+		if err := bav._flushMessageEntriesToDbWithTxn(txn); err != nil {
+			return err
+		}
+		if err := bav._flushBalanceEntriesToDbWithTxn(txn); err != nil {
+			return err
+		}
 	}
 
+	// Always flush to BadgerDB.
 	if err := bav._flushBitcoinExchangeDataWithTxn(txn); err != nil {
 		return err
 	}
-
 	if err := bav._flushGlobalParamsEntryToDbWithTxn(txn); err != nil {
 		return err
 	}
-
 	if err := bav._flushForbiddenPubKeyEntriesToDbWithTxn(txn); err != nil {
 		return err
 	}
-
-	if err := bav._flushMessageEntriesToDbWithTxn(txn); err != nil {
-		return err
-	}
-
-	if err := bav._flushLikeEntriesToDbWithTxn(txn); err != nil {
-		return err
-	}
-
-	if err := bav._flushFollowEntriesToDbWithTxn(txn); err != nil {
-		return err
-	}
-
-	if err := bav._flushDiamondEntriesToDbWithTxn(txn); err != nil {
-		return err
-	}
-
 	if err := bav._flushRecloutEntriesToDbWithTxn(txn); err != nil {
-		return err
-	}
-
-	if err := bav._flushPostEntriesToDbWithTxn(txn); err != nil {
-		return err
-	}
-	if err := bav._flushProfileEntriesToDbWithTxn(txn); err != nil {
-		return err
-	}
-	if err := bav._flushBalanceEntriesToDbWithTxn(txn); err != nil {
-		return err
-	}
-	if err := bav._flushPKIDEntriesToDbWithTxn(txn); err != nil {
 		return err
 	}
 
@@ -7653,7 +7933,15 @@ func (bav *UtxoView) FlushToDbWithTxn(txn *badger.Txn) error {
 
 func (bav *UtxoView) FlushToDb() error {
 	// Make sure everything happens inside a single transaction.
-	err := bav.Handle.Update(func(txn *badger.Txn) error {
+	var err error
+	if bav.Postgres != nil {
+		err = bav.Postgres.FlushView(bav)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = bav.Handle.Update(func(txn *badger.Txn) error {
 		return bav.FlushToDbWithTxn(txn)
 	})
 	if err != nil {

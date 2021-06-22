@@ -4,29 +4,35 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"github.com/DataDog/datadog-go/statsd"
-	"github.com/bitclout/core/lib"
 	"net"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/DataDog/datadog-go/statsd"
+	"github.com/bitclout/core/lib"
+	"github.com/bitclout/core/migrate"
 	"github.com/btcsuite/btcd/addrmgr"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/dgraph-io/badger/v3"
+	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
+	"github.com/go-pg/pg/v10"
 	"github.com/golang/glog"
+	migrations "github.com/robinjoseph08/go-pg-migrations/v3"
 	"github.com/sasha-s/go-deadlock"
 	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 	"gopkg.in/DataDog/dd-trace-go.v1/profiler"
 )
 
 type Node struct {
-	Server  *lib.Server
-	chainDB *badger.DB
-	TXIndex *lib.TXIndex
-	Params  *lib.BitCloutParams
-	Config  *Config
+	Server        *lib.Server
+	chainDB       *badger.DB
+	TXIndex       *lib.TXIndex
+	Params        *lib.BitCloutParams
+	Config        *Config
+	Postgres      *lib.Postgres
+	LocalPostgres *embeddedpostgres.EmbeddedPostgres
 }
 
 func NewNode(config *Config) *Node {
@@ -118,6 +124,42 @@ func (node *Node) Start() {
 		lib.StartDBSummarySnapshots(node.chainDB)
 	}
 
+	// Setup postgres using a remote URI or a local embedded instance
+	var db *pg.DB
+	if node.Config.PostgresURI != "" {
+		options, err := pg.ParseURL(node.Config.PostgresURI)
+		if err != nil {
+			panic(err)
+		}
+
+		db = pg.Connect(options)
+	} else if node.Config.PostgresDataDir != "" {
+		config := embeddedpostgres.DefaultConfig().DataPath(node.Config.PostgresDataDir)
+		node.LocalPostgres = embeddedpostgres.NewDatabase(config)
+		err := node.LocalPostgres.Start()
+		if err != nil {
+			panic(err)
+		}
+
+		db = pg.Connect(&pg.Options{
+			Addr:     "localhost:5432",
+			User:     "postgres",
+			Database: "postgres",
+			Password: "postgres",
+		})
+	}
+
+	if db != nil {
+		node.Postgres = lib.NewPostgres(db)
+
+		// Make sure we're migrated
+		migrate.Init()
+		err := migrations.Run(db, "migrate", []string{"", "migrate"})
+		if err != nil {
+			panic(err)
+		}
+	}
+
 	// Setup the server
 	node.Server, err = lib.NewServer(
 		node.Params,
@@ -125,6 +167,7 @@ func (node *Node) Start() {
 		bitcloutAddrMgr,
 		node.Config.ConnectIPs,
 		node.chainDB,
+		node.Postgres,
 		node.Config.TargetOutboundPeers,
 		node.Config.MaxInboundPeers,
 		node.Config.MinerPublicKeys,
@@ -171,6 +214,9 @@ func (node *Node) Stop() {
 	node.Server.Stop()
 	node.chainDB.Close()
 	node.TXIndex.Stop()
+	if node.LocalPostgres != nil {
+		node.LocalPostgres.Stop()
+	}
 }
 
 func validateParams(params *lib.BitCloutParams) {
