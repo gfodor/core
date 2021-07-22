@@ -244,7 +244,7 @@ func NewTestMiner(t *testing.T, chain *Blockchain, params *BitCloutParams, isSen
 		0, 1,
 		blockSignerSeed,
 		mempool, chain,
-		nil, params)
+		nil, params, nil)
 	require.NoError(err)
 
 	newMiner, err := NewBitCloutMiner(minerPubKeys, 1 /*numThreads*/, blockProducer, params)
