@@ -6572,6 +6572,11 @@ func (bav *UtxoView) ConnectBlock(
 }
 
 func (bav *UtxoView) Preload(bitcloutBlock *MsgBitCloutBlock) error {
+	// We can only preload if we're using postgres
+	if bav.Postgres == nil {
+		return nil
+	}
+
 	// One iteration for all the PKIDs
 	var publicKeys []*PublicKey
 	for _, txn := range bitcloutBlock.Txns {
